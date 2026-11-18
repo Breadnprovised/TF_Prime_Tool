@@ -11,8 +11,31 @@ A viewer and extractor for textures, models, and animations from Transformers Pr
 
 You also need a copy of the game. Use [Uwizard](https://digiex.net/threads/uwizard-wii-u-wud-manager-and-nus-downloader.14679/) to extract it into loose files.
 
-## Usage
-Open `tfp_tool.py`
+## Guide
+Open `tfp_tool.py` to launch the tool, then click "Open Game Folder" in the top left and go to the root of the extracted files.
+
+File | Description
+---  | --- 
+d01  | Thunderwing, humans, props, maps
+d02  | Optimus
+d03  | Arcee
+d04  | Bumblebee
+d05  | Ratchet
+d06  | Bulkhead
+d07  | Megatron
+d08  | Starscream
+d09  | Soundwave
+d10  | Arachnid
+d11  | Knockout
+d12  | Dreadwing
+d13  | Vehicon Car
+d14  | Vehicon Jet
+d15  | Vehicon Tank
+d16  | Vehicon Helicopter
+d17  | Vehicon Truck
+d18  | Insecticon
+d19  | maps, props
+d20  | explosion effect
 
 ## Disclosure
 This code is entirely AI-generated.
