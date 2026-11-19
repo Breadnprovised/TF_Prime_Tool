@@ -734,7 +734,7 @@ def run_gui():
     anim_cb = ttk.Checkbutton(bar, text='Animations', variable=exp_anim)   # animations need the skeleton
     anim_cb.pack(side='left', padx=(6, 0))
     ttk.Button(bar, text='Export', command=lambda: export_selected()).pack(side='left', padx=4)
-    ttk.Button(bar, text='Exports Folder', command=lambda: open_folder_in_os(EXPORT_DIR)).pack(side='left')
+    ttk.Button(bar, text='Open Exports Folder', command=lambda: open_folder_in_os(EXPORT_DIR)).pack(side='left')
 
     status = tk.StringVar(value='Open the game folder (the one with code/, content/, meta/).')
     sb = ttk.Frame(root, padding=2); sb.pack(side='bottom', fill='x')

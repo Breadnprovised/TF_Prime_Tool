@@ -725,12 +725,14 @@ def parse_geo(d):
         color = struct.unpack_from('>4f', d, m)
         nl = struct.unpack_from('>H', d, m + 0x4a)[0]
         layers = []
+        sig = bytes(d[m:m + 0x5c])           # raw record (incl. the material id at +0x48), texture slots excluded
         if 0 < nl < 16:
             for k in range(nl):
                 lp = m + 0x5c + 0x2c * k
                 layers.append(dict(texture=d[lp], kind=d[lp + 1], uscale=struct.unpack_from('>f', d, lp + 8)[0],
                                    vscale=struct.unpack_from('>f', d, lp + 12)[0]))
-        mats.append(dict(index=i, color=color, layers=layers))
+                sig += bytes(d[lp + 1:lp + 0x1c])
+        mats.append(dict(index=i, color=color, layers=layers, id=struct.unpack_from('>H', d, m + 0x48)[0], sig=sig))
     meshes, errors = [], []
     for mi, mp in enumerate(mesh_items):
         bbox = struct.unpack_from('>6f', d, mp)
@@ -1165,6 +1167,8 @@ def transform_model(model, X):
             N3 = s['normal'][:, :3] @ M[:3, :3].T
             N3 /= np.maximum(np.linalg.norm(N3, axis=1, keepdims=True), 1e-9)
             ns['normal'] = np.concatenate([N3, s['normal'][:, 3:]], 1).astype(np.float32)
+        if np.linalg.det(M[:3, :3]) < 0 and 'indices' in s:     # mirrored: keep the front faces counter-clockwise
+            ns['indices'] = np.ascontiguousarray(s['indices'].reshape(-1, 3)[:, ::-1].reshape(-1))
         out.append(ns)
     return dict(model, meshes=out)
 
@@ -1179,35 +1183,28 @@ def place_by_nodes(model, nodes):
     return transform_model(model, X) if X else model
 
 
-def face_flags(meshes, rel_tol=0.002, cull_tol=0.0004):
+def face_flags(meshes, rel_tol=0.002):
     """Per submesh: (cull, overlay) boolean triangle masks.
-    cull: the triangle overlaps a coplanar triangle facing the other way (a back side stored as separate
-          triangles) -> draw back-face culled, so only the side facing the camera shows.
+    cull: always empty now (everything is drawn back-face culled); kept for callers.
     overlay: the triangle lies on top of an earlier coplanar triangle facing the same way (a decal layer)
-          -> draw with a small depth bias so it wins consistently.
-    Needs scipy for the full test; without it only exact twins are found."""
+          -> draw with a small depth bias so it wins consistently. Needs scipy (else nothing is flagged)."""
+    cull = [np.zeros(len(s['indices']), bool) for s in meshes]
+    over = [np.zeros(len(s['indices']), bool) for s in meshes]
     try:
         from scipy.spatial import cKDTree
     except ImportError:
-        return _twin_faces_grid(meshes), [np.zeros(len(s['indices']), bool) for s in meshes]
-    cull = [np.zeros(len(s['indices']), bool) for s in meshes]
-    over = [np.zeros(len(s['indices']), bool) for s in meshes]
-    Ps, Ts, own, loc, UVs, COLs, MATs = [], [], [], [], [], [], []
+        return cull, over
+    Ps, Ts, own, loc = [], [], [], []
     off = 0
     for k, s in enumerate(meshes):
         t = s['indices']
         if not len(t):
             continue
-        nv = len(s['position'])
-        Ps.append(s['position'][:, :3].astype(np.float64)); Ts.append(t + off); off += nv
+        Ps.append(s['position'][:, :3].astype(np.float64)); Ts.append(t + off); off += len(s['position'])
         own.append(np.full(len(t), k)); loc.append(np.arange(len(t)))
-        UVs.append(s['uv'][:, :2].astype(np.float64) if 'uv' in s else np.zeros((nv, 2)))
-        COLs.append(s['color'][:, :4].astype(np.float64) if 'color' in s else np.full((nv, 4), 255.0))
-        MATs.append(np.full(len(t), s.get('material', 0)))
     if not Ts:
         return cull, over
     P = np.concatenate(Ps); t = np.concatenate(Ts); own = np.concatenate(own); loc = np.concatenate(loc)
-    UV = np.concatenate(UVs); COL = np.concatenate(COLs); MAT = np.concatenate(MATs)
     A, B, C = P[t[:, 0]], P[t[:, 1]], P[t[:, 2]]
     cen = (A + B + C) / 3
     n = np.cross(B - A, C - A)
@@ -1231,13 +1228,10 @@ def face_flags(meshes, rel_tol=0.002, cull_tol=0.0004):
     i, j = i[keep], j[keep]
     dots = (n[i] * n[j]).sum(1)
     sep = np.abs(((cen[i] - A[j]) * n[j]).sum(1))
-    # opposite-facing pairs must be (nearly) the same surface: a back side stored separately. Thin plates
-    # (front and back a little apart) are left alone. Same-facing decal layers may sit a bit further off.
-    keep = np.where(dots < 0, dots < -0.9994, dots > 0.9) & (sep < np.where(dots < 0, cull_tol, rel_tol) * r)
-    # (opposite-facing: within 2 degrees; steeper pairs are folds that meet along an edge, not a back side)
-    i, j, dots = i[keep], j[keep], dots[keep]
+    keep = (dots > 0.9) & (sep < rel_tol * r)          # same-facing, (nearly) coplanar
+    i, j = i[keep], j[keep]
 
-    def bary(p, a, b, c):
+    def inside(p, a, b, c):
         v0, v1, v2 = b - a, c - a, p - a
         d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
         d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
@@ -1245,80 +1239,11 @@ def face_flags(meshes, rel_tol=0.002, cull_tol=0.0004):
         ok = den > 1e-20
         den = np.where(ok, den, 1)
         v = (d11 * d20 - d01 * d21) / den; w = (d00 * d21 - d01 * d20) / den
-        return ok & (v > 0.02) & (w > 0.02) & (v + w < 0.98), np.stack([1 - v - w, v, w], 1)
-    in_j, bj = bary(cen[i], A[j], B[j], C[j])
-    in_i, bi = bary(cen[j], A[i], B[i], C[i])
-    hit = in_j | in_i
-    i, j, dots, in_j, bj, bi = i[hit], j[hit], dots[hit], in_j[hit], bj[hit], bi[hit]
-    # an opposite-facing pair only matters if its two sides look different where they overlap (other
-    # material, texture coordinates or vertex colour). Identical sides (e.g. a reversed copy of the same
-    # triangles) draw the same either way, so they stay double-sided.
-    third = np.full((len(i), 3), 1 / 3)
-    wi = np.where(in_j[:, None], third, bi)        # sample point: i's centroid if it lies in j, else j's
-    wj = np.where(in_j[:, None], bj, third)
-    def at(attr, tri, w):
-        return (attr[t[tri]] * w[:, :, None]).sum(1)
-    same = ((MAT[i] == MAT[j])
-            & (np.abs(at(UV, i, wi) - at(UV, j, wj)).max(1) < 2e-3)
-            & (np.abs(at(COL, i, wi) - at(COL, j, wj)).max(1) < 4))
-    keep = (dots > 0) | ~same
-    i, j, dots = i[keep], j[keep], dots[keep]
-    for a_, b_ in ((i[dots < 0], j[dots < 0]),):
-        for x in np.concatenate([a_, b_]):
-            cull[own[x]][loc[x]] = True
-    for x in j[dots > 0]:                 # later triangle of a same-facing pair is the overlay
+        return ok & (v > 0.02) & (w > 0.02) & (v + w < 0.98)
+    hit = inside(cen[i], A[j], B[j], C[j]) | inside(cen[j], A[i], B[i], C[i])
+    for x in j[hit]:                      # later triangle of a same-facing pair is the overlay
         over[own[x]][loc[x]] = True
     return cull, over
-
-
-def twin_faces(meshes):
-    """Triangles to draw back-face culled (see face_flags)."""
-    return face_flags(meshes)[0]
-
-
-def _twin_faces_grid(meshes, rel_cell=0.01, rel_tol=0.002):
-    """Per submesh: boolean mask of triangles that have a coincident, opposite-facing twin anywhere in
-    the model (a back side stored as separate triangles, e.g. Optimus' chest windows). Viewers should
-    back-face cull only these; everything else stays double-sided."""
-    tris, owner = [], []
-    for k, s in enumerate(meshes):
-        P = s['position'][:, :3].astype(np.float64)
-        t = s['indices']
-        if len(t):
-            tris.append(P[t]); owner.append(np.full(len(t), k))
-    masks = [np.zeros(len(s['indices']), bool) for s in meshes]
-    if not tris:
-        return masks
-    T3 = np.concatenate(tris); own = np.concatenate(owner)
-    loc = np.concatenate([np.arange(len(s['indices'])) for s in meshes if len(s['indices'])])
-    cen = T3.mean(1)
-    n = np.cross(T3[:, 1] - T3[:, 0], T3[:, 2] - T3[:, 0])
-    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-20)
-    r = max(float(np.linalg.norm(cen.max(0) - cen.min(0))) / 2, 1e-6)
-    cell, tol = r * rel_cell, r * rel_tol
-    hit = np.zeros(len(cen), bool)
-    for sx in (0.0, 0.5):
-        for sy in (0.0, 0.5):
-            for sz in (0.0, 0.5):
-                key = np.floor(cen / cell + np.array([sx, sy, sz])).astype(np.int64)
-                _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
-                inv = inv.ravel()
-                multi = np.where(cnt[inv] > 1)[0]
-                if not len(multi):
-                    continue
-                order = multi[np.argsort(inv[multi], kind='stable')]
-                groups = np.split(order, np.flatnonzero(np.diff(inv[order])) + 1)
-                for g in groups:
-                    if len(g) < 2 or len(g) > 64:
-                        continue
-                    ng, cg = n[g], cen[g]
-                    dots = ng @ ng.T
-                    pd = np.abs(((cg[:, None, :] - cg[None, :, :]) * ng[:, None, :]).sum(2))
-                    ok = (dots < -0.9) & (pd < tol) & (np.linalg.norm(cg[:, None] - cg[None], axis=2) < cell)
-                    hit[g[ok.any(1)]] = True
-    for i in np.flatnonzero(hit):
-        masks[own[i]][loc[i]] = True
-    return masks
 
 
 def skydome_groups(model, size_ratio=2.0, shell=0.6, min_height=0.08):

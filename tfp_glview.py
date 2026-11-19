@@ -144,23 +144,20 @@ class GLModelView(OpenGLFrame):
             self.center = np.zeros(3); self.radius = 1.0
         try:
             import tfp_core
-            twins, overs = tfp_core.get_face_flags(m)      # cached per visible mesh set (often precomputed)
+            overs = tfp_core.get_face_flags(m)[1]          # cached per visible mesh set (often precomputed)
         except Exception:
-            twins = [np.zeros(len(s['indices']), bool) for s in m['meshes']]
-            overs = twins
-        for si, (s, tw, ov) in enumerate(zip(m['meshes'], twins, overs)):
+            overs = [np.zeros(len(s['indices']), bool) for s in m['meshes']]
+        for si, (s, ov) in enumerate(zip(m['meshes'], overs)):
             if 'position' not in s or not len(s['indices']):
                 continue
-            # triangles with a coincident opposite-facing twin go first and are drawn back-face culled
-            # (otherwise both sides z-fight); the rest stay double-sided
-            # decal-like overlays (same-facing, coplanar with an earlier triangle) go last, drawn with a depth bias
+            # everything is drawn back-face culled (as in-game); decal-like overlays (same-facing, coplanar with
+            # an earlier triangle) go last, drawn with a depth bias
             tri = s['indices'].reshape(-1, 3)
-            ov = ov & ~tw
-            rest = ~tw & ~ov
+            rest = ~ov
             item = dict(src=si,
                         pos=np.ascontiguousarray(s['position'][:, :3], np.float32),
-                        idx=np.ascontiguousarray(np.concatenate([tri[tw], tri[rest], tri[ov]]).reshape(-1), np.uint32),
-                        ncull=int(tw.sum()) * 3, nover=int(ov.sum()) * 3)
+                        idx=np.ascontiguousarray(np.concatenate([tri[rest], tri[ov]]).reshape(-1), np.uint32),
+                        nover=int(ov.sum()) * 3)
             if 'normal' in s:
                 n = s['normal'][:, :3].astype(np.float32)
                 ln = np.linalg.norm(n, axis=1, keepdims=True); ln[ln == 0] = 1
@@ -319,6 +316,10 @@ class GLModelView(OpenGLFrame):
             gl.glRotatef(math.degrees(self.yaw), 0, 1, 0)
             gl.glTranslatef(*(-self.center).tolist())
         gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE if self.wire else gl.GL_FILL)
+        if self.wire:                       # wireframe shows every edge
+            gl.glDisable(gl.GL_CULL_FACE)
+        else:                               # back faces are culled, as in-game
+            gl.glEnable(gl.GL_CULL_FACE); gl.glFrontFace(gl.GL_CCW); gl.glCullFace(gl.GL_BACK)
         gl.glEnableClientState(gl.GL_VERTEX_ARRAY)
         for it in self.draw:
             vb = it['vbo']
@@ -341,14 +342,9 @@ class GLModelView(OpenGLFrame):
             else:
                 gl.glColor4f(*it['flat'], 1)
             gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, vb['idx'])
-            nc, nt = it.get('ncull', 0), len(it['idx'])
-            if nc:
-                gl.glEnable(gl.GL_CULL_FACE); gl.glFrontFace(gl.GL_CCW); gl.glCullFace(gl.GL_BACK)
-                gl.glDrawElements(gl.GL_TRIANGLES, nc, gl.GL_UNSIGNED_INT, None)
-                gl.glDisable(gl.GL_CULL_FACE)
-            no = it.get('nover', 0)
-            if nt - no > nc:
-                gl.glDrawElements(gl.GL_TRIANGLES, nt - no - nc, gl.GL_UNSIGNED_INT, ctypes.c_void_p(nc * 4))
+            nt, no = len(it['idx']), it.get('nover', 0)
+            if nt > no:
+                gl.glDrawElements(gl.GL_TRIANGLES, nt - no, gl.GL_UNSIGNED_INT, None)
             if no:
                 gl.glEnable(gl.GL_POLYGON_OFFSET_FILL); gl.glPolygonOffset(-1.0, -4.0)
                 gl.glDrawElements(gl.GL_TRIANGLES, no, gl.GL_UNSIGNED_INT, ctypes.c_void_p((nt - no) * 4))

@@ -13,6 +13,16 @@ def _png_bytes(rgba):
     return b.getvalue()
 
 
+def material_canon(materials):
+    """canon[i] = index of the first material identical to material i (same raw record and textures); files
+    often repeat a material once per piece. Materials without a raw signature are kept apart."""
+    first, canon = {}, []
+    for i, m in enumerate(materials):
+        key = (m.get('sig'), tuple(l['texture'] for l in m['layers'])) if m.get('sig') is not None else i
+        canon.append(first.setdefault(key, i))
+    return canon
+
+
 def _mesh_material(m, materials):
     """returns (material index, texture index or None)"""
     mi = m.get('material', 0)
@@ -67,9 +77,15 @@ def write_glb(path, model, textures, flip_v=False, name='model', part_names=None
         images.append(dict(bufferView=v, mimeType='image/png', name='%s_tex%d' % (name, i)))
         gl_textures.append(dict(source=i, sampler=0))
     gl_materials = []
-    for m in model['materials']:
+    canon = material_canon(model['materials'])
+    gl_index = {}                    # material -> glTF material (identical materials share one)
+    for i, m in enumerate(model['materials']):
+        if canon[i] != i:
+            gl_index[i] = gl_index[canon[i]]
+            continue
+        gl_index[i] = len(gl_materials)
         pbr = dict(metallicFactor=0.0, roughnessFactor=0.8)
-        gm = dict(name='mat%d' % m['index'], pbrMetallicRoughness=pbr, doubleSided=True)
+        gm = dict(name='mat%d' % m['index'], pbrMetallicRoughness=pbr)       # one-sided (back faces culled)
         if m['layers'] and m['layers'][0]['texture'] < len(textures):
             ti = m['layers'][0]['texture']
             pbr['baseColorTexture'] = dict(index=ti)
@@ -80,27 +96,13 @@ def write_glb(path, model, textures, flip_v=False, name='model', part_names=None
                     gm['alphaCutoff'] = 0.5
         gl_materials.append(gm)
     if not gl_materials:
-        gl_materials.append(dict(name='default', pbrMetallicRoughness=dict(metallicFactor=0.0), doubleSided=True))
-    # one-sided copies, used for triangles that have a coincident opposite-facing twin: the game shows only the
-    # side facing the camera, so drawing both sides would z-fight
+        gl_materials.append(dict(name='default', pbrMetallicRoughness=dict(metallicFactor=0.0)))
     n_mat = len(gl_materials)
-    onesided = {}                    # material -> its one-sided copy, created only for materials that need one
-
-    def onesided_of(mi):
-        if mi not in onesided:
-            gl_materials.append(dict(gl_materials[mi], name=gl_materials[mi]['name'] + '_onesided', doubleSided=False))
-            onesided[mi] = len(gl_materials) - 1
-        return onesided[mi]
-    try:
-        import tfp_core
-        twins = tfp_core.get_face_flags(dict(model, meshes=meshes))[0]
-    except Exception:
-        twins = [np.zeros(len(m['indices']), bool) for m in meshes]
 
     by_part = {}                     # merged-part index -> primitives (one object per part / attachment)
     rig_verts = (rig or {}).get('verts', {})
     part_skel = (rig or {}).get('part_skel', {})
-    for si_, m, tw in zip(src_idx, meshes, twins):
+    for si_, m in zip(src_idx, meshes):
         attrs = {'POSITION': add_acc(np.ascontiguousarray(m['position'][:, :3], np.float32), 5126, 'VEC3', 34962, True)}
         if 'normal' in m:
             n = m['normal'][:, :3].astype(np.float32)
@@ -124,16 +126,10 @@ def write_glb(path, model, textures, flip_v=False, name='model', part_names=None
             attrs['JOINTS_0'] = add_acc(np.ascontiguousarray(J, np.uint16), 5123, 'VEC4', 34962)
             attrs['WEIGHTS_0'] = add_acc(np.ascontiguousarray(W, np.float32), 5126, 'VEC4', 34962)
         mat = m.get('material', 0)
+        mat = gl_index.get(mat, 0) if mat < len(model['materials']) else 0
         mat = mat if mat < n_mat else 0
-        tri = m['indices'].reshape(-1, 3)
-        prims = []
-        for sel, mi in ((~tw, mat), (tw, None)):
-            if sel.any():
-                if mi is None:
-                    mi = onesided_of(mat)
-                idx = add_acc(np.ascontiguousarray(tri[sel].reshape(-1), np.uint32), 5125, 'SCALAR', 34963)
-                prims.append(dict(attributes=attrs, indices=idx, material=mi))
-        by_part.setdefault(m.get('part', 0), []).extend(prims)
+        idx = add_acc(np.ascontiguousarray(np.asarray(m['indices']).reshape(-1), np.uint32), 5125, 'SCALAR', 34963)
+        by_part.setdefault(m.get('part', 0), []).append(dict(attributes=attrs, indices=idx, material=mat))
     # one mesh (= one object in Blender) per part / attachment; its pieces are primitives with their own materials
     gl_meshes, nodes, skins = [], [], []
     top = []                         # children of the scene root node
@@ -226,7 +222,10 @@ def write_obj(path, model, textures, flip_v=True, name='model', part_names=None)
         Image.fromarray(t).save(os.path.join(d, fn))
         tex_files.append(fn)
     with open(base + '.mtl', 'w') as f:
-        for m in model['materials']:
+        canon = material_canon(model['materials'])
+        for i, m in enumerate(model['materials']):
+            if canon[i] != i:                    # identical to an earlier material: shares its entry
+                continue
             f.write('newmtl mat%d\nKd 1 1 1\n' % m['index'])
             if m['layers'] and m['layers'][0]['texture'] < len(tex_files):
                 f.write('map_Kd %s\n' % tex_files[m['layers'][0]['texture']])
@@ -244,7 +243,9 @@ def write_obj(path, model, textures, flip_v=True, name='model', part_names=None)
                 cur = k
                 pn = (part_names or {}).get(k) or (name if len(parts) == 1 else '%s_part%d' % (name, k))
                 f.write('o %s\n' % pn)
-            f.write('g mesh%d_%d\nusemtl mat%d\n' % (m['mesh'], m['sub'], m.get('material', 0)))
+            mi = m.get('material', 0)
+            mi = model['materials'][canon[mi]]['index'] if mi < len(canon) else mi
+            f.write('g mesh%d_%d\nusemtl mat%d\n' % (m['mesh'], m['sub'], mi))
             np.savetxt(f, m['position'][:, :3], fmt='v %.6f %.6f %.6f')
             has_uv, has_n = 'uv' in m, 'normal' in m
             if has_uv:
