@@ -4,8 +4,8 @@ Transformers Prime: The Game (Wii U) - model & texture viewer / extractor.
 
 Requires: Python 3.8+, numpy, Pillow   (pip install numpy pillow)
 
-GUI:   python tfp_tool.py
-CLI:   python tfp_tool.py extract <game folder> <output folder> [--obj] [--textures] [--raw] [--placeholders]
+GUI:   python scripts/tfp_tool.py   (or "Open Texture-Model Viewer.bat")
+CLI:   python scripts/tfp_tool.py extract <game folder> <output folder> [--obj] [--textures] [--raw] [--placeholders]
 
 Select the game folder (the one containing code/ content/ meta/, or the content folder itself).
 """
@@ -36,7 +36,9 @@ except Exception as _gl_err:
 PLACEHOLDER_SIZE = 0xc48  # the game's dummy unit-cube model
 
 
-TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# the tool's main folder: the scripts live in its 'scripts' subfolder
+TOOL_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR).lower() == 'scripts' else SCRIPT_DIR
 EXPORT_DIR = os.path.join(TOOL_DIR, '.exported')     # every export goes here
 
 
@@ -902,12 +904,18 @@ def run_gui():
         return '%.1f MB' % (n / 1048576) if n >= 1048576 else '%.1f KB' % (n / 1024)
 
     def selected_entries():
-        out = []
-        for iid in tree.selection():
+        out, seen = [], set()
+
+        def walk(iid):
+            if iid in seen:
+                return
+            seen.add(iid)
             if iid in state['items']:
                 out.append(state['items'][iid])
-            else:
-                out += [state['items'][c] for c in tree.get_children(iid) if c in state['items']]
+            for c in tree.get_children(iid):      # folders: everything inside, at any depth
+                walk(c)
+        for iid in tree.selection():
+            walk(iid)
         return out
 
     def fill_partsbar(r):
