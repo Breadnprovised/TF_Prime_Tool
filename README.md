@@ -10,8 +10,6 @@ A tool for viewing and extracting assets from Transformers Prime The Game for th
 
 ## Requirements
 
-Download the tool by clicking the green "Code" dropdown in the top right, then select "Download ZIP."
-
 [Python](https://www.python.org/) is required. 
 
 After installing Python, you'll need some packages. Paste the following into command prompt to install them:
@@ -21,11 +19,13 @@ After installing Python, you'll need some packages. Paste the following into com
 You also need a copy of the game. Use [Uwizard](https://digiex.net/threads/uwizard-wii-u-wud-manager-and-nus-downloader.14679/) to extract it into loose files.
 
 ## Guide
-Use the .bat files to launch the tools.
+Download the tool by clicking the green "Code" dropdown in the top right, then select "Download ZIP." 
 
-If they don't launch or run slowly, make sure you've installed all required packages!
+Extract the zip, and use the .bat files to launch the tools.
 
-## File Layout
+If they don't launch or run slowly, make sure you've installed all required packages.
+
+## File Layout (Textures / Models / Animations)
 
 File | Description
 ---  | --- 
